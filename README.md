@@ -10,7 +10,7 @@ Assessment implementation for the Full Stack Developer role. The app compares th
 - Checkpoints sampled at 10, 25, or 50 mile intervals.
 - ETA-aware wind, rain, and snow classification with load-weight escalation rules.
 - Leaflet map with route corridors, risk-colored checkpoints, heatmap-style forecast overlay, and a 0–48 hour slider.
-- Django WSGI API entrypoint for Vercel health checks and future provider-side integrations.
+- Python API endpoints at `/api/health` and `/api/analyze` for Vercel health checks and provider-side integrations.
 
 ## Run locally
 
@@ -29,7 +29,7 @@ python -m pip install -r requirements.txt
 python -m django --version
 ```
 
-Vercel deploys `api/index.py` using the Python runtime and serves the root React entrypoint as static assets.
+Vercel uses the `Other` preset to serve `index.html`, `app.js`, and `styles.css` from the repository root. Python functions in `api/` serve `/api/health` and `/api/analyze` directly.
 
 ## Risk model
 
