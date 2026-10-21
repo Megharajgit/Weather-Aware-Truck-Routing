@@ -4,8 +4,7 @@ const html = htm.bind(React.createElement);
 const RISK_RANK = { Low: 0, Moderate: 1, High: 2, Severe: 3, "No Travel": 4 };
 const RISK_COLORS = { Low: "#82d46f", Moderate: "#f4c464", High: "#ff9363", Severe: "#ff6471", "No Travel": "#c783ff" };
 const ROUTE_COLORS = ["#a6f36f", "#75e1de", "#c783ff"];
-const DEMO_COORDS = { origin: { lat: 39.7392, lon: -104.9903 }, destination: { lat: 41.8781, lon: -87.6298 } };
-const DEMO_FORM = { origin: "Denver, CO", destination: "Chicago, IL", departure: "2026-10-21T08:00", weight: "38000" };
+const DEMO_FORM = { origin: "Denver, CO", destination: "Chicago, IL", weight: "38000", grossWeight: "80000", heightFt: "13.5" };
 
 function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
 function milesBetween(a, b) {
@@ -27,66 +26,39 @@ function formatNumber(value) { return new Intl.NumberFormat().format(Math.round(
 function slugify(value) { return value.toLowerCase().replace(/\s+/g, "-"); }
 function levelFromRank(rank) { return Object.keys(RISK_RANK).find((key) => RISK_RANK[key] === rank) || "Low"; }
 
-async function geocode(place) {
-  const fallback = place.toLowerCase().includes("denver") ? DEMO_COORDS.origin : place.toLowerCase().includes("chicago") ? DEMO_COORDS.destination : null;
-  try {
-    const response = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(place)}`, { headers: { Accept: "application/json" } });
-    if (!response.ok) throw new Error("geocoder unavailable");
-    const results = await response.json();
-    if (!results.length) throw new Error("location not found");
-    return { lat: Number(results[0].lat), lon: Number(results[0].lon), label: results[0].display_name };
-  } catch (error) {
-    if (fallback) return { ...fallback, label: place };
-    throw new Error(`Could not locate ${place}. Try a city and state or ZIP code.`);
-  }
-}
-
-function offsetPoint(start, end, fraction, offset) {
-  const lat = start.lat + (end.lat - start.lat) * fraction;
-  const lon = start.lon + (end.lon - start.lon) * fraction;
-  const perpendicularLat = -(end.lon - start.lon) * offset;
-  const perpendicularLon = (end.lat - start.lat) * offset;
-  const curve = Math.sin(fraction * Math.PI) * offset;
-  return { lat: lat + perpendicularLat * curve, lon: lon + perpendicularLon * curve };
-}
-
-function createDemoGeometry(start, end, variant) {
-  const offsets = [0.035, -0.016, 0.058];
-  const points = [];
-  for (let index = 0; index <= 28; index += 1) {
-    const point = offsetPoint(start, end, index / 28, offsets[variant]);
-    points.push([point.lat, point.lon]);
-  }
-  return points;
-}
-
-async function fetchRouteAlternatives(start, end) {
-  const endpoint = `https://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=full&geometries=geojson&alternatives=true&steps=false`;
-  try {
-    const response = await fetch(endpoint, { signal: AbortSignal.timeout(6500) });
-    if (!response.ok) throw new Error("routing unavailable");
-    const payload = await response.json();
-    const routes = (payload.routes || []).slice(0, 3);
-    if (!routes.length) throw new Error("no routes");
-    const normalized = routes.map((route) => ({ coordinates: route.geometry.coordinates.map(([lon, lat]) => [lat, lon]), distanceMiles: route.distance / 1609.344, durationHours: route.duration / 3600 }));
-    while (normalized.length < 3) {
-      const variant = normalized.length;
-      const base = normalized[0];
-      normalized.push({ coordinates: createDemoGeometry(start, end, variant), distanceMiles: base.distanceMiles * [1, 1.06, 1.12][variant], durationHours: base.durationHours * [1, 1.08, 1.16][variant] });
-    }
-    return normalized;
-  } catch (error) {
-    const straightLine = milesBetween(start, end);
-    return [0, 1, 2].map((variant) => ({ coordinates: createDemoGeometry(start, end, variant), distanceMiles: straightLine * [1.075, 1.11, 1.16][variant], durationHours: [straightLine / 52, straightLine / 49, straightLine / 47][variant] }));
-  }
+async function fetchRouteAlternatives(origin, destination, form) {
+  const response = await fetch("/api/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ origin, destination, loadWeightLb: Number(form.weight), grossWeightLb: Number(form.grossWeight), heightFt: Number(form.heightFt) }),
+    signal: AbortSignal.timeout(22000),
+  });
+  let payload;
+  try { payload = await response.json(); } catch { throw new Error("The routing service returned an unreadable response."); }
+  if (!response.ok) throw new Error(payload.error || "Mapbox could not analyze this route.");
+  return payload;
 }
 
 function pointAlongPath(coordinates, fraction) {
-  const index = Math.min(coordinates.length - 2, Math.floor(fraction * (coordinates.length - 1)));
-  const localFraction = fraction * (coordinates.length - 1) - index;
-  const first = coordinates[index];
-  const second = coordinates[index + 1];
-  return [first[0] + (second[0] - first[0]) * localFraction, first[1] + (second[1] - first[1]) * localFraction];
+  const lengths = [];
+  let total = 0;
+  for (let index = 1; index < coordinates.length; index += 1) {
+    const length = milesBetween({ lat: coordinates[index - 1][0], lon: coordinates[index - 1][1] }, { lat: coordinates[index][0], lon: coordinates[index][1] });
+    lengths.push(length);
+    total += length;
+  }
+  if (!lengths.length || !total) return coordinates[0];
+  let remaining = clamp(fraction, 0, 1) * total;
+  for (let index = 0; index < lengths.length; index += 1) {
+    if (remaining <= lengths[index] || index === lengths.length - 1) {
+      const localFraction = lengths[index] ? clamp(remaining / lengths[index], 0, 1) : 0;
+      const first = coordinates[index];
+      const second = coordinates[index + 1];
+      return [first[0] + (second[0] - first[0]) * localFraction, first[1] + (second[1] - first[1]) * localFraction];
+    }
+    remaining -= lengths[index];
+  }
+  return coordinates[coordinates.length - 1];
 }
 
 function classifyWeather(wind, rain, snow, loadWeight) {
@@ -134,35 +106,65 @@ function summarizeRoute(checkpoints, durationHours) {
 async function enrichWithWeather(routes, loadWeight) {
   const checkpoints = routes.flatMap((route) => route.checkpoints);
   if (!checkpoints.length) return routes;
-  const latitude = checkpoints.map((checkpoint) => checkpoint.lat.toFixed(4)).join(",");
-  const longitude = checkpoints.map((checkpoint) => checkpoint.lon.toFixed(4)).join(",");
-  const endpoint = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&hourly=wind_speed_10m,precipitation,rain,snowfall&forecast_days=3&wind_speed_unit=mph&precipitation_unit=inch&timezone=UTC`;
-  const response = await fetch(endpoint, { signal: AbortSignal.timeout(8000) });
-  if (!response.ok) throw new Error("forecast unavailable");
-  const payload = await response.json();
-  const forecasts = Array.isArray(payload) ? payload : [payload];
+  const batches = [];
+  for (let index = 0; index < checkpoints.length; index += 30) batches.push(checkpoints.slice(index, index + 30));
+  const forecasts = (await Promise.all(batches.map(async (batch) => {
+    const query = new URLSearchParams({
+      latitude: batch.map((point) => point.lat.toFixed(4)).join(","),
+      longitude: batch.map((point) => point.lon.toFixed(4)).join(","),
+      hourly: "wind_speed_10m,rain,snowfall",
+      forecast_days: "7",
+      wind_speed_unit: "mph",
+      precipitation_unit: "inch",
+      timezone: "UTC",
+    });
+    const response = await fetch(`https://api.open-meteo.com/v1/forecast?${query}`, { signal: AbortSignal.timeout(12000) });
+    if (!response.ok) throw new Error("Open-Meteo forecast unavailable");
+    const payload = await response.json();
+    return Array.isArray(payload) ? payload : [payload];
+  }))).flat();
   let cursor = 0;
   return routes.map((route) => {
     const checkpointsWithWeather = route.checkpoints.map((checkpoint) => {
-    const forecast = forecasts[cursor];
-    cursor += 1;
-    if (!forecast?.hourly?.time?.length) return checkpoint;
-    const timeIndex = forecast.hourly.time.reduce((closest, value, index) => Math.abs(Date.parse(value) - checkpoint.eta.getTime()) < Math.abs(Date.parse(forecast.hourly.time[closest]) - checkpoint.eta.getTime()) ? index : closest, 0);
-    const wind = Number(forecast.hourly.wind_speed_10m?.[timeIndex] ?? checkpoint.wind);
-    const rain = Number(forecast.hourly.rain?.[timeIndex] ?? forecast.hourly.precipitation?.[timeIndex] ?? checkpoint.rain);
-    const snow = Number(forecast.hourly.snowfall?.[timeIndex] ?? checkpoint.snow);
-    return { ...checkpoint, liveWeather: true, wind, rain, snow, risk: classifyWeather(wind, rain, snow, loadWeight) };
+      const forecast = forecasts[cursor];
+      cursor += 1;
+      if (!forecast?.hourly?.time?.length) return checkpoint;
+      return {
+        ...checkpoint,
+        liveWeather: true,
+        forecastTimes: forecast.hourly.time,
+        forecastWind: forecast.hourly.wind_speed_10m,
+        forecastRain: forecast.hourly.rain,
+        forecastSnow: forecast.hourly.snowfall,
+      };
     });
     return { ...route, checkpoints: checkpointsWithWeather, summary: summarizeRoute(checkpointsWithWeather, route.durationHours) };
   });
 }
 
+function weatherForTime(checkpoint, targetTime, loadWeight) {
+  const times = checkpoint.forecastTimes;
+  if (!times?.length) return null;
+  let closest = 0;
+  for (let index = 1; index < times.length; index += 1) {
+    if (Math.abs(Date.parse(times[index]) - targetTime) < Math.abs(Date.parse(times[closest]) - targetTime)) closest = index;
+  }
+  const difference = Math.abs(Date.parse(times[closest]) - targetTime);
+  if (!Number.isFinite(difference) || difference > 90 * 60 * 1000) return null;
+  const wind = Number(checkpoint.forecastWind?.[closest]);
+  const rain = Number(checkpoint.forecastRain?.[closest]);
+  const snow = Number(checkpoint.forecastSnow?.[closest]);
+  if (![wind, rain, snow].every(Number.isFinite)) return null;
+  return { liveWeather: true, wind, rain, snow, risk: classifyWeather(wind, rain, snow, loadWeight) };
+}
+
 function buildRoutes(rawRoutes, origin, destination, form, interval) {
   const departure = new Date(form.departure);
-  const routeNames = ["Northern corridor", "Central corridor", "Southern corridor"];
-  const routes = rawRoutes.slice(0, 3).map((rawRoute, index) => {
+  const routes = rawRoutes.slice(0, 2).map((rawRoute, index) => {
     const checkpoints = buildCheckpoints(rawRoute, index, departure, Number(form.weight), interval);
-    return { ...rawRoute, id: `route-${index}`, name: `Route ${String.fromCharCode(65 + index)}`, corridor: routeNames[index], color: ROUTE_COLORS[index], checkpoints, summary: summarizeRoute(checkpoints, rawRoute.durationHours), origin, destination };
+    const name = `Route ${String.fromCharCode(65 + index)}`;
+    const corridor = index === 0 ? "Mapbox primary route" : "Mapbox alternative route";
+    return { ...rawRoute, id: `route-${index}`, name, corridor, color: ROUTE_COLORS[index], checkpoints, summary: summarizeRoute(checkpoints, rawRoute.durationHours), origin, destination };
   });
   return routes.sort((first, second) => {
     const a = first.summary;
@@ -183,28 +185,30 @@ function RouteCard({ route, active, onClick }) {
     </article>`;
 }
 
-function RouteForm({ form, setForm, onSubmit, loading }) {
+function RouteForm({ form, setForm, onSubmit, resetDemo, loading }) {
   const update = (key) => (event) => setForm((current) => ({ ...current, [key]: event.target.value }));
   return html`
     <form className="route-form" onSubmit=${(event) => { event.preventDefault(); onSubmit(); }}>
       <div className="field location-field"><label for="origin">Origin</label><span className="location-icon">●</span><input id="origin" value=${form.origin} onInput=${update("origin")} placeholder="City, state or ZIP" required /></div>
       <div className="field location-field"><label for="destination">Destination</label><span className="location-icon">◆</span><input id="destination" value=${form.destination} onInput=${update("destination")} placeholder="City, state or ZIP" required /></div>
       <div className="field"><label for="departure">Departure date and time</label><input id="departure" type="datetime-local" value=${form.departure} onInput=${update("departure")} required /></div>
-      <div className="field"><label for="weight">Load weight</label><div className="input-suffix"><input id="weight" type="number" min="0" max="100000" step="100" value=${form.weight} onInput=${update("weight")} required /><span className="suffix">lb</span></div></div>
+      <div className="field"><label for="weight">Cargo load weight</label><div className="input-suffix"><input id="weight" type="number" min="0" max="100000" step="100" value=${form.weight} onInput=${update("weight")} required /><span className="suffix">lb</span></div><small className="field-help">Used to score wind exposure.</small></div>
+      <div className="field"><label for="grossWeight">Truck gross weight</label><div className="input-suffix"><input id="grossWeight" type="number" min="1" max="220462" step="500" value=${form.grossWeight} onInput=${update("grossWeight")} required /><span className="suffix">lb</span></div><small className="field-help">Used for Mapbox road weight limits.</small></div>
+      <div className="field"><label for="heightFt">Truck height</label><div className="input-suffix"><input id="heightFt" type="number" min="1" max="32.8" step="0.1" value=${form.heightFt} onInput=${update("heightFt")} required /><span className="suffix">ft</span></div><small className="field-help">Used for available road height limits.</small></div>
       <button className="button-primary" type="submit" disabled=${loading}>${loading ? "Analyzing corridor…" : "Analyze safest routes  →"}</button>
-      <button className="demo-link" type="button" onClick=${() => { setForm(DEMO_FORM); onSubmit(DEMO_FORM); }}>Reset to Denver → Chicago demo</button>
+      <button className="demo-link" type="button" onClick=${resetDemo}>Reset to Denver → Chicago demo</button>
     </form>`;
 }
 
-function MapView({ routes, activeRouteId, forecastHour, onSelect }) {
+function MapView({ routes, activeRouteId, forecastHour, onSelect, mapToken }) {
   const mapElement = useRef(null);
   const mapRef = useRef(null);
   const layersRef = useRef(null);
+  const baseLayerRef = useRef(null);
   useEffect(() => {
     if (!mapElement.current || mapRef.current || !window.L) return;
     const map = window.L.map(mapElement.current, { zoomControl: false, attributionControl: true }).setView([39.5, -96], 4);
     window.L.control.zoom({ position: "bottomright" }).addTo(map);
-    window.L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 18, attribution: '&copy; OpenStreetMap &copy; CARTO' }).addTo(map);
     mapRef.current = map;
     layersRef.current = window.L.layerGroup().addTo(map);
     setTimeout(() => map.invalidateSize(), 100);
@@ -212,9 +216,20 @@ function MapView({ routes, activeRouteId, forecastHour, onSelect }) {
   }, []);
   useEffect(() => {
     const map = mapRef.current;
+    if (!map || !window.L) return;
+    if (baseLayerRef.current) baseLayerRef.current.remove();
+    const attribution = '&copy; <a href="https://www.mapbox.com/about/maps/">Mapbox</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+    baseLayerRef.current = mapToken
+      ? window.L.tileLayer(`https://api.mapbox.com/styles/v1/mapbox/dark-v11/tiles/512/{z}/{x}/{y}@2x?access_token=${encodeURIComponent(mapToken)}`, { tileSize: 512, zoomOffset: -1, maxZoom: 22, attribution })
+      : window.L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 18, attribution: '&copy; OpenStreetMap &copy; CARTO' });
+    baseLayerRef.current.addTo(map);
+  }, [mapToken]);
+  useEffect(() => {
+    const map = mapRef.current;
     const layers = layersRef.current;
-    if (!map || !layers || !routes.length) return;
+    if (!map || !layers) return;
     layers.clearLayers();
+    if (!routes.length) return;
     const bounds = [];
     routes.forEach((route) => {
       const active = route.id === activeRouteId;
@@ -235,7 +250,7 @@ function MapView({ routes, activeRouteId, forecastHour, onSelect }) {
     window.L.marker(first.coordinates[first.coordinates.length - 1], { title: "Destination" }).bindTooltip("Destination", { permanent: false }).addTo(layers);
     if (bounds.length) map.fitBounds(bounds, { padding: [25, 25], maxZoom: 7 });
   }, [routes, activeRouteId, forecastHour, onSelect]);
-  return html`<div className="map-panel"><div id="map" ref=${mapElement}></div><div className="map-overlay"><div className="map-chip"><span className="legend-dot"></span> Route corridors</div><div className="map-chip"><span className="legend-dot heat"></span> Weather risk heatmap</div></div></div>`;
+  return html`<div className="map-panel"><div id="map" ref=${mapElement}></div><div className="map-overlay"><div className="map-chip"><span className="legend-dot"></span> Mapbox route options</div><div className="map-chip"><span className="legend-dot heat"></span> Open-Meteo weather risk</div></div></div>`;
 }
 
 function CheckpointTable({ route, interval }) {
@@ -259,36 +274,55 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("Ready for analysis");
+  const [mapToken, setMapToken] = useState("");
   const analysisRequestRef = useRef(0);
   const displayRoutes = useMemo(() => routes.map((route, routeIndex) => {
     const checkpoints = route.checkpoints.map((checkpoint) => {
-      const weather = forecastHour === 0 && checkpoint.liveWeather ? checkpoint : weatherAt(routeIndex, checkpoint.index, Math.max(0, (checkpoint.eta.getTime() - new Date(form.departure).getTime()) / 3600000) + forecastHour, Number(form.weight));
+      const targetTime = checkpoint.eta.getTime() + forecastHour * 3600000;
+      const weather = weatherForTime(checkpoint, targetTime, Number(form.weight)) || weatherAt(routeIndex, checkpoint.index, Math.max(0, (checkpoint.eta.getTime() - new Date(form.departure).getTime()) / 3600000) + forecastHour, Number(form.weight));
       return { ...checkpoint, ...weather };
     });
     return { ...route, checkpoints, summary: summarizeRoute(checkpoints, route.durationHours) };
   }).sort((first, second) => first.summary.severeMiles - second.summary.severeMiles || first.summary.highMiles - second.summary.highMiles || first.summary.averageRisk - second.summary.averageRisk || first.summary.durationHours - second.summary.durationHours).map((route, index) => ({ ...route, isRecommended: index === 0 })), [routes, forecastHour, form.departure, form.weight]);
   const activeRoute = useMemo(() => displayRoutes.find((route) => route.id === activeRouteId) || displayRoutes[0], [displayRoutes, activeRouteId]);
 
+  useEffect(() => {
+    fetch("/api/config").then((response) => response.ok ? response.json() : Promise.reject(new Error("config unavailable"))).then((config) => setMapToken(config.mapboxPublicToken || "")).catch(() => {});
+  }, []);
+
   const runAnalysis = async (submittedForm = form) => {
     const requestId = analysisRequestRef.current + 1;
     analysisRequestRef.current = requestId;
-    setLoading(true); setError(""); setStatus("Locating origin and destination…");
+    setLoading(true); setError(""); setRoutes([]); setActiveRouteId(null); setStatus("Geocoding locations with Mapbox…");
     try {
-      const [origin, destination] = await Promise.all([geocode(submittedForm.origin), geocode(submittedForm.destination)]);
-      setStatus("Finding route alternatives…");
-      const rawRoutes = await fetchRouteAlternatives(origin, destination);
-      const analyzedRoutes = buildRoutes(rawRoutes, origin, destination, submittedForm, interval);
-      setRoutes(analyzedRoutes); setActiveRouteId(analyzedRoutes[0].id); setForecastHour(0); setStatus("Weather-aware analysis complete");
-      enrichWithWeather(analyzedRoutes, Number(submittedForm.weight)).then((enrichedRoutes) => { if (analysisRequestRef.current === requestId) { setRoutes(enrichedRoutes); setStatus("Live forecast enriched · fallback ready"); } }).catch(() => { if (analysisRequestRef.current === requestId) setStatus("Analysis complete · demo forecast active"); });
+      setStatus("Finding Mapbox routes with truck dimensions…");
+      const routeData = await fetchRouteAlternatives(submittedForm.origin, submittedForm.destination, submittedForm);
+      const analyzedRoutes = buildRoutes(routeData.routes, routeData.origin, routeData.destination, submittedForm, interval);
+      if (!analyzedRoutes.length) throw new Error("Mapbox returned no usable route options.");
+      setRoutes(analyzedRoutes); setActiveRouteId(analyzedRoutes[0].id); setForecastHour(0); setStatus(`Mapbox found ${analyzedRoutes.length} route${analyzedRoutes.length === 1 ? "" : "s"} · loading hourly weather…`);
+      enrichWithWeather(analyzedRoutes, Number(submittedForm.weight)).then((enrichedRoutes) => { if (analysisRequestRef.current === requestId) { setRoutes(enrichedRoutes); setStatus("Mapbox routes · Open-Meteo forecast ready"); } }).catch(() => { if (analysisRequestRef.current === requestId) setStatus("Mapbox routes · forecast fallback active"); });
     } catch (analysisError) {
       setError(analysisError.message || "Unable to analyze this corridor."); setStatus("Analysis needs attention");
     } finally { setLoading(false); }
   };
 
-  useEffect(() => { runAnalysis({ ...DEMO_FORM, departure: formatDateInput(new Date()) }); }, []);
-  useEffect(() => { if (routes.length) { const rebuilt = buildRoutes(routes, routes[0].origin, routes[0].destination, form, interval); setRoutes(rebuilt); setActiveRouteId(rebuilt[0].id); } }, [interval]);
+  const resetDemo = () => {
+    const demo = { ...DEMO_FORM, departure: formatDateInput(new Date()) };
+    setForm(demo);
+    runAnalysis(demo);
+  };
 
-  return html`<div className="app-shell"><header className="topbar"><div className="brand"><div className="brand-mark">S</div><div className="brand-name">spotter<span>AI</span></div></div><div className="topbar-right"><span className="live-dot"></span><span>Routing intelligence</span><span className="topbar-badge">Assessment build · v1.0</span></div></header><div className="workspace"><aside className="sidebar"><p className="eyebrow">Driver safety console</p><h1>Find the safer way forward.</h1><p className="subcopy">Compare route corridors against expected weather at the exact time your truck reaches each checkpoint.</p><${RouteForm} form=${form} setForm=${setForm} onSubmit=${runAnalysis} loading=${loading} /><div className="sidebar-foot"><strong>How scoring works</strong>We rank each corridor by severe miles, high-risk miles, average weather risk, and finally drive time. Load weight can escalate wind conditions.</div></aside><main className="main"><div className="main-header"><div><h2>Weather-aware route planner</h2><p>${form.origin} <span aria-hidden="true">→</span> ${form.destination} · ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(form.departure))}</p></div><div className="status-pill"><span className=${`status-pulse ${loading ? "loading" : ""}`}></span>${status}</div></div>${error ? html`<div className="error-banner">${error}</div>` : null}<${MapView} routes=${displayRoutes} activeRouteId=${activeRouteId} forecastHour=${forecastHour} onSelect=${setActiveRouteId} /><div className="forecast-strip"><div className="forecast-label"><strong>Forecast window</strong><span>Weather heatmap along corridor</span></div><div className="slider-wrap"><span>Now</span><input type="range" min="0" max="48" step="1" value=${forecastHour} onInput=${(event) => setForecastHour(Number(event.target.value))} /><span>48h</span></div><div className="slider-value">+${forecastHour} hours</div><div className="map-note">● Checkpoints sampled every ${interval} mi</div></div><div className="section-heading"><div><h3>Route options</h3><span>Three corridors ranked for this load</span></div><div className="interval-switch">${[10, 25, 50].map((value) => html`<button className=${interval === value ? "active" : ""} onClick=${() => setInterval(value)}>${value} mi</button>`)}</div></div><div className="route-grid">${displayRoutes.length ? displayRoutes.map((route) => html`<${RouteCard} key=${route.id} route=${route} active=${route.id === activeRouteId} onClick=${() => setActiveRouteId(route.id)} />`) : html`<div className="panel skeleton"><div><div className="spinner"></div>Building route options…</div></div>`}</div><div className="section-heading"><div><h3>Route detail</h3><span>Arrival-time weather snapshots</span></div></div><div className="details-grid"><${CheckpointTable} route=${activeRoute} interval=${interval} /><${SummaryPanel} route=${activeRoute} form=${form} /></div></main></div></div>`;
+  useEffect(() => { runAnalysis({ ...DEMO_FORM, departure: formatDateInput(new Date()) }); }, []);
+  useEffect(() => {
+    if (!routes.length) return;
+    const rebuilt = buildRoutes(routes, routes[0].origin, routes[0].destination, form, interval);
+    const requestId = analysisRequestRef.current + 1;
+    analysisRequestRef.current = requestId;
+    setRoutes(rebuilt); setActiveRouteId(rebuilt[0].id); setStatus("Refreshing route checkpoints and weather…");
+    enrichWithWeather(rebuilt, Number(form.weight)).then((enrichedRoutes) => { if (analysisRequestRef.current === requestId) { setRoutes(enrichedRoutes); setStatus("Mapbox routes · Open-Meteo forecast ready"); } }).catch(() => { if (analysisRequestRef.current === requestId) setStatus("Mapbox routes · forecast fallback active"); });
+  }, [interval]);
+
+  return html`<div className="app-shell"><header className="topbar"><div className="brand"><div className="brand-mark">S</div><div className="brand-name">spotter<span>AI</span></div></div><div className="topbar-right"><span className="live-dot"></span><span>Routing intelligence</span><span className="topbar-badge">Mapbox + Open-Meteo</span></div></header><div className="workspace"><aside className="sidebar"><p className="eyebrow">Driver safety console</p><h1>Find the safer way forward.</h1><p className="subcopy">Compare Mapbox route options against hourly weather at each checkpoint. Truck gross weight and height filter available road restrictions.</p><${RouteForm} form=${form} setForm=${setForm} onSubmit=${runAnalysis} resetDemo=${resetDemo} loading=${loading} /><div className="sidebar-foot"><strong>How scoring works</strong>Routes are ranked by severe miles, high-risk miles, average weather risk, then travel time. Cargo load can escalate wind risk.</div></aside><main className="main"><div className="main-header"><div><h2>Weather-aware route planner</h2><p>${form.origin} <span aria-hidden="true">→</span> ${form.destination} · ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(form.departure))}</p></div><div className="status-pill"><span className=${`status-pulse ${loading ? "loading" : ""}`}></span>${status}</div></div>${error ? html`<div className="error-banner">${error}</div>` : null}<${MapView} routes=${displayRoutes} activeRouteId=${activeRouteId} forecastHour=${forecastHour} onSelect=${setActiveRouteId} mapToken=${mapToken} /><div className="forecast-strip"><div className="forecast-label"><strong>Forecast window</strong><span>Open-Meteo at checkpoint arrival time</span></div><div className="slider-wrap"><span>Now</span><input type="range" min="0" max="48" step="1" value=${forecastHour} onInput=${(event) => setForecastHour(Number(event.target.value))} /><span>48h</span></div><div className="slider-value">+${forecastHour} hours</div><div className="map-note">● Checkpoints sampled every ${interval} mi</div></div><div className="section-heading"><div><h3>Route options</h3><span>${displayRoutes.length ? `${displayRoutes.length} Mapbox driving option${displayRoutes.length === 1 ? "" : "s"} ranked by weather risk` : "Waiting for Mapbox route options"}</span></div><div className="interval-switch">${[10, 25, 50].map((value) => html`<button className=${interval === value ? "active" : ""} onClick=${() => setInterval(value)}>${value} mi</button>`)}</div></div><div className="route-grid">${displayRoutes.length ? displayRoutes.map((route) => html`<${RouteCard} key=${route.id} route=${route} active=${route.id === activeRouteId} onClick=${() => setActiveRouteId(route.id)} />`) : html`<div className="panel skeleton"><div><div className="spinner"></div>${loading ? "Finding Mapbox routes…" : "Enter locations to find route options."}</div></div>`}</div><div className="section-heading"><div><h3>Route detail</h3><span>Open-Meteo arrival-time snapshots</span></div></div><div className="details-grid"><${CheckpointTable} route=${activeRoute} interval=${interval} /><${SummaryPanel} route=${activeRoute} form=${form} /></div></main></div></div>`;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(html`<${App} />`);

@@ -1,5 +1,6 @@
-from http.server import BaseHTTPRequestHandler
 import json
+import os
+from http.server import BaseHTTPRequestHandler
 
 
 class handler(BaseHTTPRequestHandler):
@@ -7,7 +8,8 @@ class handler(BaseHTTPRequestHandler):
         body = json.dumps({
             "ok": True,
             "service": "spotter-routing-api",
-            "mode": "demo-compatible",
+            "mode": "mapbox-open-meteo",
+            "mapboxConfigured": bool(os.environ.get("MAPBOX_ACCESS_TOKEN") and os.environ.get("MAPBOX_PUBLIC_TOKEN")),
         }).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
