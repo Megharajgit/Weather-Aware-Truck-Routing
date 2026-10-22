@@ -200,88 +200,203 @@ function RouteForm({ form, setForm, onSubmit, resetDemo, loading }) {
     </form>`;
 }
 
-function MapView({ routes, activeRouteId, forecastHour, onSelect, mapToken }) {
+function MapView({ routes, activeRouteId, forecastHour, onSelect }) {
   const mapElement = useRef(null);
   const mapRef = useRef(null);
-  const layersRef = useRef(null);
-  const baseLayerRef = useRef(null);
+  const maplibreRef = useRef(null);
+  const onSelectRef = useRef(onSelect);
+  const lastGeometryKeyRef = useRef("");
+  const [mapReady, setMapReady] = useState(false);
+  const [mapError, setMapError] = useState("");
+  onSelectRef.current = onSelect;
+
   useEffect(() => {
-    if (!mapElement.current || mapRef.current || !window.L) return;
-    const mapContainer = mapElement.current;
-    const map = window.L.map(mapContainer, { zoomControl: false, attributionControl: true }).setView([39.5, -96], 4);
-    window.L.control.zoom({ position: "bottomright" }).addTo(map);
-    mapRef.current = map;
-    layersRef.current = window.L.layerGroup().addTo(map);
-    let resizeFrame = 0;
-    const resizeMap = () => {
-      if (resizeFrame) cancelAnimationFrame(resizeFrame);
-      resizeFrame = requestAnimationFrame(() => {
-        resizeFrame = 0;
-        if (mapRef.current !== map || !mapContainer.isConnected) return;
-        const { width, height } = mapContainer.getBoundingClientRect();
-        if (!width || !height) return;
-        const currentSize = map.getSize();
-        if (Math.round(width) !== currentSize.x || Math.round(height) !== currentSize.y) {
-          map.invalidateSize({ pan: false, debounceMoveend: true });
-        }
-      });
-    };
+    let cancelled = false;
     let resizeObserver;
-    if (typeof ResizeObserver !== "undefined") {
-      resizeObserver = new ResizeObserver(resizeMap);
-      resizeObserver.observe(mapContainer);
-    } else {
-      window.addEventListener("resize", resizeMap);
-    }
+    let resizeFrame = 0;
+    let resizeHandler;
+    let map;
+    const mapContainer = mapElement.current;
+
+    const initializeMap = async () => {
+      if (!mapContainer) return;
+      try {
+        const maplibregl = await import("https://unpkg.com/maplibre-gl@6.15.0/dist/maplibre-gl.mjs");
+        if (cancelled || !mapContainer.isConnected) return;
+        maplibreRef.current = maplibregl;
+        map = new maplibregl.Map({
+          container: mapContainer,
+          style: "https://tiles.openfreemap.org/styles/positron",
+          center: [-98, 39],
+          zoom: 3.5,
+          maxPitch: 0,
+          dragRotate: false,
+          pitchWithRotate: false,
+          touchPitch: false,
+          attributionControl: { compact: false },
+        });
+        mapRef.current = map;
+        map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
+
+        map.on("load", () => {
+          if (cancelled) return;
+          setMapReady(true);
+          requestAnimationFrame(() => {
+            if (!cancelled && mapRef.current === map) map.resize();
+          });
+        });
+        map.on("error", (event) => {
+          if (!cancelled && !map.isStyleLoaded()) {
+            setMapError(event.error?.message || "The map style could not be loaded. Please refresh the page.");
+          }
+        });
+
+        const resizeMap = () => {
+          if (resizeFrame) cancelAnimationFrame(resizeFrame);
+          resizeFrame = requestAnimationFrame(() => {
+            resizeFrame = 0;
+            if (cancelled || mapRef.current !== map || !mapContainer.isConnected) return;
+            const { width, height } = mapContainer.getBoundingClientRect();
+            if (width > 0 && height > 0) map.resize();
+          });
+        };
+        if (typeof ResizeObserver !== "undefined") {
+          resizeObserver = new ResizeObserver(resizeMap);
+          resizeObserver.observe(mapContainer);
+        } else {
+          resizeHandler = resizeMap;
+          window.addEventListener("resize", resizeMap);
+        }
+      } catch (error) {
+        if (!cancelled) setMapError(error.message || "MapLibre could not be started.");
+      }
+    };
+
+    initializeMap();
     return () => {
+      cancelled = true;
       resizeObserver?.disconnect();
-      window.removeEventListener("resize", resizeMap);
+      if (resizeHandler) window.removeEventListener("resize", resizeHandler);
       if (resizeFrame) cancelAnimationFrame(resizeFrame);
       if (mapRef.current === map) {
-        map.remove();
+        map?.remove();
         mapRef.current = null;
-        layersRef.current = null;
-        baseLayerRef.current = null;
+        maplibreRef.current = null;
       }
     };
   }, []);
+
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !window.L) return;
-    if (baseLayerRef.current) baseLayerRef.current.remove();
-    const attribution = '&copy; <a href="https://www.mapbox.com/about/maps/">Mapbox</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
-    baseLayerRef.current = mapToken
-      ? window.L.tileLayer(`https://api.mapbox.com/styles/v1/mapbox/dark-v11/tiles/512/{z}/{x}/{y}@2x?access_token=${encodeURIComponent(mapToken)}`, { tileSize: 512, zoomOffset: -1, maxZoom: 22, attribution })
-      : window.L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 18, attribution: '&copy; OpenStreetMap &copy; CARTO' });
-    baseLayerRef.current.addTo(map);
-  }, [mapToken]);
-  useEffect(() => {
-    const map = mapRef.current;
-    const layers = layersRef.current;
-    if (!map || !layers) return;
-    layers.clearLayers();
-    if (!routes.length) return;
-    const bounds = [];
-    routes.forEach((route) => {
-      const active = route.id === activeRouteId;
-      const line = window.L.polyline(route.coordinates, { color: route.color, weight: active ? 5 : 3, opacity: active ? 0.95 : 0.45, lineCap: "round" }).addTo(layers);
-      line.on("click", () => onSelect(route.id));
-      line.bindTooltip(`${route.name} · ${route.corridor}`, { sticky: true, className: "route-popup" });
-      route.coordinates.forEach((point) => bounds.push(point));
-      route.checkpoints.forEach((checkpoint) => {
-        const riskColor = RISK_COLORS[checkpoint.risk];
-        const heatRadius = active ? 19000 : 12000;
-        window.L.circle([checkpoint.lat, checkpoint.lon], { radius: heatRadius, stroke: false, fillColor: riskColor, fillOpacity: active ? 0.095 : 0.035 }).addTo(layers);
-        const marker = window.L.circleMarker([checkpoint.lat, checkpoint.lon], { radius: active ? 6 : 4, color: riskColor, weight: 1, fillColor: riskColor, fillOpacity: active ? 0.95 : 0.5 }).addTo(layers);
-        marker.bindPopup(`<div class="route-popup"><strong>${route.name} · ${checkpoint.distance.toFixed(0)} mi</strong><span>ETA ${formatEta(checkpoint.eta)}<br>${checkpoint.wind.toFixed(0)} mph wind · ${checkpoint.rain.toFixed(2)} in/hr rain<br>${checkpoint.risk} risk</span></div>`);
+    const maplibregl = maplibreRef.current;
+    if (!mapReady || !map || !maplibregl) return;
+
+    const routeFeatures = routes.map((route) => ({
+      type: "Feature",
+      geometry: { type: "LineString", coordinates: route.coordinates.map(([lat, lon]) => [lon, lat]) },
+      properties: { routeId: route.id, name: route.name, corridor: route.corridor, color: route.color, active: route.id === activeRouteId },
+    }));
+    const checkpointFeatures = routes.flatMap((route) => route.checkpoints.map((checkpoint) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [checkpoint.lon, checkpoint.lat] },
+      properties: {
+        routeId: route.id,
+        routeName: route.name,
+        active: route.id === activeRouteId,
+        distance: checkpoint.distance,
+        eta: checkpoint.eta instanceof Date ? checkpoint.eta.toISOString() : checkpoint.eta,
+        wind: checkpoint.wind,
+        rain: checkpoint.rain,
+        snow: checkpoint.snow,
+        risk: checkpoint.risk,
+        color: RISK_COLORS[checkpoint.risk] || RISK_COLORS.Low,
+      },
+    })));
+    const firstRoute = routes[0];
+    const endpointFeatures = firstRoute ? [
+      { type: "Feature", geometry: { type: "Point", coordinates: [firstRoute.coordinates[0][1], firstRoute.coordinates[0][0]] }, properties: { label: "Origin", color: "#a6f36f" } },
+      { type: "Feature", geometry: { type: "Point", coordinates: [firstRoute.coordinates.at(-1)[1], firstRoute.coordinates.at(-1)[0]] }, properties: { label: "Destination", color: "#31b8c6" } },
+    ] : [];
+    const featureCollection = (features) => ({ type: "FeatureCollection", features });
+
+    const updateSource = (id, data) => {
+      const source = map.getSource(id);
+      if (source) source.setData(data);
+    };
+    updateSource("spotter-routes", featureCollection(routeFeatures));
+    updateSource("spotter-checkpoints", featureCollection(checkpointFeatures));
+    updateSource("spotter-endpoints", featureCollection(endpointFeatures));
+
+    if (routes.length && !map.getSource("spotter-routes")) {
+      map.addSource("spotter-routes", { type: "geojson", data: featureCollection(routeFeatures) });
+      map.addSource("spotter-checkpoints", { type: "geojson", data: featureCollection(checkpointFeatures) });
+      map.addSource("spotter-endpoints", { type: "geojson", data: featureCollection(endpointFeatures) });
+      map.addLayer({
+        id: "spotter-route-casing", type: "line", source: "spotter-routes",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#22373b", "line-width": ["case", ["get", "active"], 10, 7], "line-opacity": ["case", ["get", "active"], 0.9, 0.58] },
       });
-    });
-    const first = routes[0];
-    window.L.marker(first.coordinates[0], { title: "Origin" }).bindTooltip("Origin", { permanent: false }).addTo(layers);
-    window.L.marker(first.coordinates[first.coordinates.length - 1], { title: "Destination" }).bindTooltip("Destination", { permanent: false }).addTo(layers);
-    if (bounds.length) map.fitBounds(bounds, { padding: [25, 25], maxZoom: 7 });
-  }, [routes, activeRouteId, forecastHour, onSelect]);
-  return html`<div className="map-panel"><div id="map" ref=${mapElement}></div><div className="map-overlay"><div className="map-chip"><span className="legend-dot"></span> Mapbox route options</div><div className="map-chip"><span className="legend-dot heat"></span> Open-Meteo weather risk</div></div></div>`;
+      map.addLayer({
+        id: "spotter-route-lines", type: "line", source: "spotter-routes",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": ["get", "color"], "line-width": ["case", ["get", "active"], 6, 3], "line-opacity": ["case", ["get", "active"], 1, 0.64] },
+      });
+      map.addLayer({
+        id: "spotter-weather-glow", type: "circle", source: "spotter-checkpoints",
+        paint: { "circle-radius": ["case", ["get", "active"], 17, 11], "circle-color": ["get", "color"], "circle-blur": 0.8, "circle-opacity": ["case", ["get", "active"], 0.34, 0.17] },
+      });
+      map.addLayer({
+        id: "spotter-weather-points", type: "circle", source: "spotter-checkpoints",
+        paint: { "circle-radius": ["case", ["get", "active"], 5, 3.5], "circle-color": ["get", "color"], "circle-stroke-color": "#ffffff", "circle-stroke-width": ["case", ["get", "active"], 1.5, 1], "circle-opacity": ["case", ["get", "active"], 1, 0.75] },
+      });
+      map.addLayer({
+        id: "spotter-endpoint-circles", type: "circle", source: "spotter-endpoints",
+        paint: { "circle-radius": 7, "circle-color": ["get", "color"], "circle-stroke-color": "#ffffff", "circle-stroke-width": 2 },
+      });
+      map.addLayer({
+        id: "spotter-endpoint-labels", type: "symbol", source: "spotter-endpoints",
+        layout: { "text-field": ["get", "label"], "text-font": ["Noto Sans Regular"], "text-size": 11, "text-offset": [0, 1.35], "text-anchor": "top", "text-allow-overlap": true },
+        paint: { "text-color": "#193237", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
+      });
+      map.on("click", "spotter-route-lines", (event) => {
+        const feature = event.features?.[0];
+        if (feature?.properties?.routeId) onSelectRef.current(feature.properties.routeId);
+      });
+      map.on("click", "spotter-weather-points", (event) => {
+        const feature = event.features?.[0];
+        if (!feature) return;
+        const properties = feature.properties;
+        const content = document.createElement("div");
+        content.className = "route-popup";
+        const heading = document.createElement("strong");
+        heading.textContent = `${properties.routeName} · ${Number(properties.distance).toFixed(0)} mi`;
+        const details = document.createElement("span");
+        const eta = properties.eta ? formatEta(new Date(properties.eta)) : "Unknown";
+        details.textContent = `ETA ${eta} · ${properties.risk} risk · ${Number(properties.wind).toFixed(0)} mph wind · ${Number(properties.rain).toFixed(2)} in/hr rain`;
+        content.append(heading, details);
+        new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: "230px", className: "spotter-map-popup" })
+          .setLngLat(event.lngLat)
+          .setDOMContent(content)
+          .addTo(map);
+      });
+      ["spotter-route-lines", "spotter-weather-points"].forEach((layerId) => {
+        map.on("mouseenter", layerId, () => { map.getCanvas().style.cursor = "pointer"; });
+        map.on("mouseleave", layerId, () => { map.getCanvas().style.cursor = ""; });
+      });
+    }
+
+    const geometryKey = routes.slice().sort((first, second) => first.id.localeCompare(second.id)).map((route) => `${route.id}:${JSON.stringify(route.coordinates)}`).join("|");
+    if (routes.length && geometryKey !== lastGeometryKeyRef.current) {
+      const coordinates = routes.flatMap((route) => route.coordinates.map(([lat, lon]) => [lon, lat]));
+      const bounds = coordinates.reduce((current, point) => current.extend(point), new maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
+      map.fitBounds(bounds, { padding: { top: 76, right: 44, bottom: 42, left: 44 }, maxZoom: 7, duration: 550 });
+      lastGeometryKeyRef.current = geometryKey;
+    } else if (!routes.length) {
+      lastGeometryKeyRef.current = "";
+    }
+  }, [routes, activeRouteId, forecastHour, mapReady]);
+
+  return html`<div className="map-panel"><div id="map" ref=${mapElement}></div><div className="map-overlay"><div className="map-chip"><span className="legend-dot"></span> Mapbox route options</div><div className="map-chip"><span className="legend-dot heat"></span> Open-Meteo weather risk</div></div>${mapError ? html`<div className="map-error" role="status">${mapError}</div>` : null}</div>`;
 }
 
 function CheckpointTable({ route, interval }) {
@@ -305,7 +420,6 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("Ready for analysis");
-  const [mapToken, setMapToken] = useState("");
   const analysisRequestRef = useRef(0);
   const displayRoutes = useMemo(() => routes.map((route, routeIndex) => {
     const checkpoints = route.checkpoints.map((checkpoint) => {
@@ -316,10 +430,6 @@ function App() {
     return { ...route, checkpoints, summary: summarizeRoute(checkpoints, route.durationHours) };
   }).sort((first, second) => first.summary.severeMiles - second.summary.severeMiles || first.summary.highMiles - second.summary.highMiles || first.summary.averageRisk - second.summary.averageRisk || first.summary.durationHours - second.summary.durationHours).map((route, index) => ({ ...route, isRecommended: index === 0 })), [routes, forecastHour, form.departure, form.weight]);
   const activeRoute = useMemo(() => displayRoutes.find((route) => route.id === activeRouteId) || displayRoutes[0], [displayRoutes, activeRouteId]);
-
-  useEffect(() => {
-    fetch("/api/config").then((response) => response.ok ? response.json() : Promise.reject(new Error("config unavailable"))).then((config) => setMapToken(config.mapboxPublicToken || "")).catch(() => {});
-  }, []);
 
   const runAnalysis = async (submittedForm = form) => {
     const requestId = analysisRequestRef.current + 1;
@@ -353,7 +463,7 @@ function App() {
     enrichWithWeather(rebuilt, Number(form.weight)).then((enrichedRoutes) => { if (analysisRequestRef.current === requestId) { setRoutes(enrichedRoutes); setStatus("Mapbox routes · Open-Meteo forecast ready"); } }).catch(() => { if (analysisRequestRef.current === requestId) setStatus("Mapbox routes · forecast fallback active"); });
   }, [interval]);
 
-  return html`<div className="app-shell"><header className="topbar"><div className="brand"><div className="brand-mark">S</div><div className="brand-name">spotter<span>AI</span></div></div><div className="topbar-right"><span className="live-dot"></span><span>Routing intelligence</span><span className="topbar-badge">Mapbox + Open-Meteo</span></div></header><div className="workspace"><aside className="sidebar"><p className="eyebrow">Driver safety console</p><h1>Find the safer way forward.</h1><p className="subcopy">Compare Mapbox route options against hourly weather at each checkpoint. Truck gross weight and height filter available road restrictions.</p><${RouteForm} form=${form} setForm=${setForm} onSubmit=${runAnalysis} resetDemo=${resetDemo} loading=${loading} /><div className="sidebar-foot"><strong>How scoring works</strong>Routes are ranked by severe miles, high-risk miles, average weather risk, then travel time. Cargo load can escalate wind risk.</div></aside><main className="main"><div className="main-header"><div><h2>Weather-aware route planner</h2><p>${form.origin} <span aria-hidden="true">→</span> ${form.destination} · ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(form.departure))}</p></div><div className="status-pill"><span className=${`status-pulse ${loading ? "loading" : ""}`}></span>${status}</div></div>${error ? html`<div className="error-banner">${error}</div>` : null}<${MapView} routes=${displayRoutes} activeRouteId=${activeRouteId} forecastHour=${forecastHour} onSelect=${setActiveRouteId} mapToken=${mapToken} /><div className="forecast-strip"><div className="forecast-label"><strong>Forecast window</strong><span>Open-Meteo at checkpoint arrival time</span></div><div className="slider-wrap"><span>Now</span><input type="range" min="0" max="48" step="1" value=${forecastHour} onInput=${(event) => setForecastHour(Number(event.target.value))} /><span>48h</span></div><div className="slider-value">+${forecastHour} hours</div><div className="map-note">● Checkpoints sampled every ${interval} mi</div></div><div className="section-heading"><div><h3>Route options</h3><span>${displayRoutes.length ? `${displayRoutes.length} Mapbox driving option${displayRoutes.length === 1 ? "" : "s"} ranked by weather risk` : "Waiting for Mapbox route options"}</span></div><div className="interval-switch">${[10, 25, 50].map((value) => html`<button className=${interval === value ? "active" : ""} onClick=${() => setInterval(value)}>${value} mi</button>`)}</div></div><div className="route-grid">${displayRoutes.length ? displayRoutes.map((route) => html`<${RouteCard} key=${route.id} route=${route} active=${route.id === activeRouteId} onClick=${() => setActiveRouteId(route.id)} />`) : html`<div className="panel skeleton"><div><div className="spinner"></div>${loading ? "Finding Mapbox routes…" : "Enter locations to find route options."}</div></div>`}</div><div className="section-heading"><div><h3>Route detail</h3><span>Open-Meteo arrival-time snapshots</span></div></div><div className="details-grid"><${CheckpointTable} route=${activeRoute} interval=${interval} /><${SummaryPanel} route=${activeRoute} form=${form} /></div></main></div></div>`;
+  return html`<div className="app-shell"><header className="topbar"><div className="brand"><div className="brand-mark">S</div><div className="brand-name">spotter<span>AI</span></div></div><div className="topbar-right"><span className="live-dot"></span><span>Routing intelligence</span><span className="topbar-badge">Mapbox + Open-Meteo</span></div></header><div className="workspace"><aside className="sidebar"><p className="eyebrow">Driver safety console</p><h1>Find the safer way forward.</h1><p className="subcopy">Compare Mapbox route options against hourly weather at each checkpoint. Truck gross weight and height filter available road restrictions.</p><${RouteForm} form=${form} setForm=${setForm} onSubmit=${runAnalysis} resetDemo=${resetDemo} loading=${loading} /><div className="sidebar-foot"><strong>How scoring works</strong>Routes are ranked by severe miles, high-risk miles, average weather risk, then travel time. Cargo load can escalate wind risk.</div></aside><main className="main"><div className="main-header"><div><h2>Weather-aware route planner</h2><p>${form.origin} <span aria-hidden="true">→</span> ${form.destination} · ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(form.departure))}</p></div><div className="status-pill"><span className=${`status-pulse ${loading ? "loading" : ""}`}></span>${status}</div></div>${error ? html`<div className="error-banner">${error}</div>` : null}<${MapView} routes=${displayRoutes} activeRouteId=${activeRouteId} forecastHour=${forecastHour} onSelect=${setActiveRouteId} /><div className="forecast-strip"><div className="forecast-label"><strong>Forecast window</strong><span>Open-Meteo at checkpoint arrival time</span></div><div className="slider-wrap"><span>Now</span><input type="range" min="0" max="48" step="1" value=${forecastHour} onInput=${(event) => setForecastHour(Number(event.target.value))} /><span>48h</span></div><div className="slider-value">+${forecastHour} hours</div><div className="map-note">● Checkpoints sampled every ${interval} mi</div></div><div className="section-heading"><div><h3>Route options</h3><span>${displayRoutes.length ? `${displayRoutes.length} Mapbox driving option${displayRoutes.length === 1 ? "" : "s"} ranked by weather risk` : "Waiting for Mapbox route options"}</span></div><div className="interval-switch">${[10, 25, 50].map((value) => html`<button className=${interval === value ? "active" : ""} onClick=${() => setInterval(value)}>${value} mi</button>`)}</div></div><div className="route-grid">${displayRoutes.length ? displayRoutes.map((route) => html`<${RouteCard} key=${route.id} route=${route} active=${route.id === activeRouteId} onClick=${() => setActiveRouteId(route.id)} />`) : html`<div className="panel skeleton"><div><div className="spinner"></div>${loading ? "Finding Mapbox routes…" : "Enter locations to find route options."}</div></div>`}</div><div className="section-heading"><div><h3>Route detail</h3><span>Open-Meteo arrival-time snapshots</span></div></div><div className="details-grid"><${CheckpointTable} route=${activeRoute} interval=${interval} /><${SummaryPanel} route=${activeRoute} form=${form} /></div></main></div></div>`;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(html`<${App} />`);

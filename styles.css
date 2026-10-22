@@ -79,13 +79,20 @@ button { cursor: pointer; }
 .map-chip { display: flex; align-items: center; gap: 7px; padding: 8px 10px; border: 1px solid rgba(255,255,255,.13); border-radius: 8px; background: rgba(7, 20, 26, .85); color: var(--muted-strong); font-size: 11px; backdrop-filter: blur(8px); }
 .legend-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 .legend-dot.heat { background: var(--severe); box-shadow: 0 0 0 4px rgba(255,100,113,.18); }
-.leaflet-container { width: 100%; height: 100%; background: #183439; font: inherit; }
-.leaflet-control-zoom a { background: #0d2026 !important; color: var(--muted-strong) !important; border-color: var(--line) !important; }
-.leaflet-control-attribution { background: rgba(7,20,26,.75) !important; color: #87999b !important; }
-.leaflet-control-attribution a { color: #a6f36f !important; }
+#map .maplibregl-map, #map .maplibregl-canvas-container, #map .maplibregl-canvas { width: 100%; height: 100%; font: inherit; }
+.maplibregl-ctrl-group { overflow: hidden; border: 1px solid rgba(7,20,26,.25) !important; border-radius: 8px !important; box-shadow: 0 3px 12px rgba(0,0,0,.2) !important; }
+.maplibregl-ctrl-group button { background-color: #0d2026 !important; }
+.maplibregl-ctrl-group button span { filter: invert(1) brightness(1.4); }
+.maplibregl-ctrl-attrib { background: rgba(255,255,255,.82) !important; color: #3a4b4d !important; }
+.maplibregl-ctrl-attrib a { color: #315f54 !important; }
+.maplibregl-popup-content { padding: 11px 13px; border-radius: 9px; background: #0d2026; color: var(--ink); box-shadow: 0 8px 25px rgba(0,0,0,.3); }
+.maplibregl-popup-tip { border-top-color: #0d2026 !important; border-bottom-color: #0d2026 !important; }
+.maplibregl-popup-close-button { color: var(--muted-strong); font-size: 18px; }
+.spotter-map-popup .route-popup { min-width: 190px; }
 .route-popup { min-width: 176px; color: #e8f1ee; }
 .route-popup strong { display: block; color: #a6f36f; margin-bottom: 5px; }
 .route-popup span { color: #748b8d; font-size: 11px; }
+.map-error { position: absolute; inset: auto 16px 16px; z-index: 600; padding: 10px 12px; border: 1px solid rgba(255,100,113,.4); border-radius: 8px; background: rgba(7,20,26,.92); color: #ffc0c5; font-size: 12px; }
 
 .forecast-strip { margin-top: 12px; padding: 12px 15px; display: flex; align-items: center; gap: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 .forecast-label { min-width: 135px; }

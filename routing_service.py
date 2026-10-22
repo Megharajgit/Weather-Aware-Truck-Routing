@@ -62,11 +62,8 @@ def _geocode(place, token):
 
 def analyze_routes(payload):
     token = os.environ.get("MAPBOX_ACCESS_TOKEN", "").strip()
-    public_token = os.environ.get("MAPBOX_PUBLIC_TOKEN", "").strip()
     if not token:
         raise ApiError(503, "mapbox_access_token_missing", "Add MAPBOX_ACCESS_TOKEN to the Vercel project environment variables, then redeploy.")
-    if not public_token:
-        raise ApiError(503, "mapbox_public_token_missing", "Add MAPBOX_PUBLIC_TOKEN to the Vercel project environment variables, then redeploy.")
 
     origin_text = str(payload.get("origin", "")).strip()[:160]
     destination_text = str(payload.get("destination", "")).strip()[:160]
