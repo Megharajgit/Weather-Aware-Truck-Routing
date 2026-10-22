@@ -207,12 +207,43 @@ function MapView({ routes, activeRouteId, forecastHour, onSelect, mapToken }) {
   const baseLayerRef = useRef(null);
   useEffect(() => {
     if (!mapElement.current || mapRef.current || !window.L) return;
-    const map = window.L.map(mapElement.current, { zoomControl: false, attributionControl: true }).setView([39.5, -96], 4);
+    const mapContainer = mapElement.current;
+    const map = window.L.map(mapContainer, { zoomControl: false, attributionControl: true }).setView([39.5, -96], 4);
     window.L.control.zoom({ position: "bottomright" }).addTo(map);
     mapRef.current = map;
     layersRef.current = window.L.layerGroup().addTo(map);
-    setTimeout(() => map.invalidateSize(), 100);
-    return () => map.remove();
+    let resizeFrame = 0;
+    const resizeMap = () => {
+      if (resizeFrame) cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = 0;
+        if (mapRef.current !== map || !mapContainer.isConnected) return;
+        const { width, height } = mapContainer.getBoundingClientRect();
+        if (!width || !height) return;
+        const currentSize = map.getSize();
+        if (Math.round(width) !== currentSize.x || Math.round(height) !== currentSize.y) {
+          map.invalidateSize({ pan: false, debounceMoveend: true });
+        }
+      });
+    };
+    let resizeObserver;
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver(resizeMap);
+      resizeObserver.observe(mapContainer);
+    } else {
+      window.addEventListener("resize", resizeMap);
+    }
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", resizeMap);
+      if (resizeFrame) cancelAnimationFrame(resizeFrame);
+      if (mapRef.current === map) {
+        map.remove();
+        mapRef.current = null;
+        layersRef.current = null;
+        baseLayerRef.current = null;
+      }
+    };
   }, []);
   useEffect(() => {
     const map = mapRef.current;
